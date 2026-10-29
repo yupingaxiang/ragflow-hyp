@@ -32,6 +32,7 @@ import json
 # compile_structure_from_text, merge_compiled_structures,
 # validate_and_correct_chain) moved to ``chunk_post_processor``.
 import xxhash
+from rag.utils.qa_image_storage import enqueue_images
 
 from timeit import default_timer as timer
 from typing import AsyncIterator, Callable, Dict, List, Optional
@@ -612,6 +613,10 @@ class TaskHandler:
             abort_doc_chunking_counter(task_doc_id)
             return
         ctx.recording_context.record("insertion_result", "success")
+
+        # 原切片入库成功后提交独立存储；对比运行不能重复写 OSS 或映射表。
+        if not ctx.write_interceptor:
+            await thread_pool_exec(enqueue_images, ctx.raw_task, chunks)
 
         # Post-processing
         post_processor = PostProcessor(ctx=ctx)

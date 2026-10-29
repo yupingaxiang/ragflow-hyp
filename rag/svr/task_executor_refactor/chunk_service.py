@@ -41,6 +41,7 @@ from common.float_utils import normalize_overlapped_percent
 from rag.nlp import search
 from rag.svr.task_executor_refactor.task_context import TaskContext
 from rag.utils.base64_image import image2id
+from rag.utils.qa_image_storage import stage_images
 
 from api.db.services.task_service import TaskService
 from rag.svr.task_executor_refactor.constants import GRAPH_RAPTOR_FAKE_DOC_ID
@@ -133,6 +134,9 @@ class ChunkService:
 
         # Run chunking (delegated)
         cks = await run_chunking(chunker, storage_binary, ctx)
+
+        # 对比执行仅移除临时字段，不暂存或提交真实图片任务。
+        await thread_pool_exec(stage_images, cks, ctx.raw_task, bool(ctx.write_interceptor))
 
         # Record raw chunks
         self._task_context.recording_context.record("raw_chunks", cks)

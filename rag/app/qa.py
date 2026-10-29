@@ -31,6 +31,7 @@ from docx import Document
 from markdown import markdown
 
 from common.float_utils import get_float
+from rag.utils.qa_image_storage import attach_word_images, attach_pdf_images
 
 
 class Excel(ExcelParser):
@@ -379,7 +380,10 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
         pdf_parser = Pdf()
         qai_list, tbls = pdf_parser(filename if not binary else binary, from_page=from_page, to_page=to_page, callback=callback)
         for q, a, image, poss in qai_list:
-            res.append(beAdocPdf(deepcopy(doc), q, a, eng, image, poss))
+            parsed = beAdocPdf(deepcopy(doc), q, a, eng, image, poss)
+            # 复用已有问答坐标保留独立插图，提取失败由旁路记录并隔离。
+            attach_pdf_images(parsed, pdf_parser, poss)
+            res.append(parsed)
         return res
 
     elif re.search(r"\.(md|markdown|mdx)$", filename, re.IGNORECASE):
@@ -423,7 +427,10 @@ def chunk(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang=
                                      from_page=0, to_page=MAXIMUM_PAGE_NUMBER, callback=callback)
         res = tokenize_table(tbls, doc, eng, language=lang)
         for i, (q, a, image) in enumerate(qai_list):
-            res.append(beAdocDocx(deepcopy(doc), q, a, eng, image, i))
+            parsed = beAdocDocx(deepcopy(doc), q, a, eng, image, i)
+            # 只复制原图二进制引用，不转换或关闭原合并图对象。
+            attach_word_images(parsed, image)
+            res.append(parsed)
         return res
 
     raise NotImplementedError("Excel, csv(txt), pdf, markdown and docx format files are supported.")

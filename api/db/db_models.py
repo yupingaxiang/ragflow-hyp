@@ -33,6 +33,7 @@ from peewee import (
     OperationalError,
     ProgrammingError,
     BigIntegerField,
+    BigAutoField,
     BooleanField,
     CharField,
     CompositeKey,
@@ -905,6 +906,27 @@ class Document(DataBaseModel):
 
     class Meta:
         db_table = "document"
+
+
+class ChunkImageMapping(DataBaseModel):
+    """维护已入库 QA 切片、合并图与有序独立图片 OSS 路径的关系。"""
+
+    id = BigAutoField()
+    kb_id = CharField(max_length=32, null=False)
+    doc_id = CharField(max_length=32, null=False, index=True)
+    chunk_id = CharField(max_length=64, null=False)
+    merged_image_id = CharField(max_length=128, null=False)
+    # 整组读取，数组顺序即原文顺序，复用项目既有列表序列化规则。
+    image_paths = ListField(null=False, default=list)
+
+    class Meta:
+        """使用联合唯一约束避免后台任务重试新增重复映射。"""
+
+        db_table = "chunk_image_mapping"
+        indexes = (
+            (("kb_id", "doc_id", "chunk_id"), True),
+            (("kb_id", "merged_image_id"), False),
+        )
 
 
 class File(DataBaseModel):

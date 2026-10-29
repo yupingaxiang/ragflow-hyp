@@ -45,6 +45,7 @@ from api.db.joint_services.memory_message_service import handle_save_to_memory_t
 from common.connection_utils import timeout
 from common.metadata_utils import turn2jsonschema, update_metadata_to
 from rag.utils.base64_image import image2id
+from rag.utils.qa_image_storage import stage_images, enqueue_images, consume_images
 from rag.utils.raptor_utils import (
     collect_raptor_chunk_ids,
     collect_raptor_methods,
@@ -354,6 +355,9 @@ async def build_chunks(task, progress_callback):
         progress_callback(-1, "Internal server error while chunking: %s" % str(e).replace("'", ""))
         logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
+
+    # 旁路暂存使用现有 Redis，失败由模块隔离；不改变切片字段与原有图片上传。
+    await thread_pool_exec(stage_images, cks, task)
 
     # Record raw chunks for comparison
     get_recording_context().record("raw_chunks", cks)
@@ -1600,6 +1604,8 @@ async def do_handle_task(task):
             get_recording_context().record("insertion_result", "failed")
             return
         get_recording_context().record("insertion_result", "success")
+        # 独立队列提交失败不会改变原有索引结果或解析进度。
+        await thread_pool_exec(enqueue_images, task, chunks)
         if has_canceled(task_id):
             progress_callback(-1, msg="Task has been canceled.")
             return
@@ -1909,6 +1915,8 @@ async def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     report_task = asyncio.create_task(report_status())
+    # 独立消费者复用现有 Redis 队列，不占用原有解析任务并发额度。
+    qa_image_task = asyncio.create_task(consume_images(CONSUMER_NAME, stop_event))
     tasks = []
 
     logging.info(f"RAGFlow ingestion is ready after {time.time() - start_ts}s initialization.")
@@ -1923,6 +1931,8 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
         report_task.cancel()
         await asyncio.gather(report_task, return_exceptions=True)
+        qa_image_task.cancel()
+        await asyncio.gather(qa_image_task, return_exceptions=True)
     logging.error("BUG!!! You should not reach here!!!")
 
 

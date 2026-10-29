@@ -22,7 +22,7 @@ import re
 
 import xxhash
 from pydantic import BaseModel, Field, validator
-from quart import request
+from quart import Response, current_app, request
 
 from api.apps import login_required
 from api.db.joint_services.tenant_model_service import (
@@ -49,6 +49,7 @@ from api.utils.api_utils import (
 )
 from api.utils.pagination_utils import validate_rest_api_page_size
 from api.utils.image_utils import store_chunk_image
+from api.utils.retrieval_image_utils import enrich_retrieval_images
 from api.utils.reference_metadata_utils import (
     enrich_chunks_with_document_metadata,
     resolve_reference_metadata_preferences,
@@ -436,6 +437,30 @@ async def retrieval_test(tenant_id):
         if "not_found" in str(e):
             return get_result(message="No chunk found! Check the chunk status please!", code=RetCode.DATA_ERROR)
         return server_error_response(e)
+
+
+@manager.route("/retrieval/images", methods=["POST"])  # noqa: F821
+async def retrieval_with_images() -> Response:
+    """复用原召回入口，仅在新接口响应中增加独立图片路径。
+
+    原入口的装饰器继续执行登录校验和租户注入，不绕过原有鉴权。
+    请求参数与原接口一致；缺少合并图或映射时返回空图片列表。
+
+    Returns:
+        保留原响应状态及响应头、每个切片增加 image_paths 的响应。
+        原接口返回错误时不做任何补充，直接返回该错误响应。
+    """
+    # 直接调用带原有鉴权装饰器的入口，不复制或改写检索流程。
+    response = await retrieval_test()
+    payload = await response.get_json()
+    if payload.get("code") != RetCode.SUCCESS:
+        return response
+
+    chunks = payload.get("data", {}).get("chunks", [])
+    # JSON 解码后的切片属于本次响应，不修改检索器可能共享的结果。
+    await thread_pool_exec(enrich_retrieval_images, chunks)
+    response.set_data(current_app.json.dumps(payload))
+    return response
 
 
 @manager.route("/datasets/<dataset_id>/documents/<document_id>/chunks", methods=["GET"])  # noqa: F821

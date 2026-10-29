@@ -2,7 +2,8 @@
 
 作者：hyp  
 日期：2026-10-28  
-状态：方案讨论稿，尚未实施
+
+状态：短图片 ID 版本已构建为 ragflow:0.26.4-qa-images-short-id，待用户验证，未切换现有服务；此前目录格式已完成本地 MinIO 联调，实际 OSS 尚未联调
 
 ## 1. 目标与范围
 
@@ -16,7 +17,7 @@ Word、PDF 使用 QA 解析时，一个问答对关联的图片最终成为一�
 - 异步上传到现有 OSS。
 - 将合并图、切片和有序 OSS 路径列表的关系保存到 MySQL。
 
-本次不实现重新解析、历史数据补齐、文档删除联动、检索接口和前端展示。上述功能不能视为已经支持。
+存储阶段不处理重新解析、历史数据补齐、文档删除联动和前端展示。后续新增召回接口的范围及行为见第 12 节，原有召回接口保持不变。
 
 ## 2. 已确认的源码行为
 
@@ -96,15 +97,16 @@ QA 解析
 
 ### OSS 路径
 
-独立图片使用新的路径前缀，与原有合并图隔离。示意：
+独立图片与原有合并图统一使用无目录、无扩展名的 16 位十六进制对象名。每张图片根据知识库、文档、切片、图片组摘要及序号计算稳定短 ID，并使用独立命名域区分合并图。示意：
 
 ```text
-qa-images/{kb_id}/{doc_id}/{chunk_id}/{任务标识}/0.jpg
-qa-images/{kb_id}/{doc_id}/{chunk_id}/{任务标识}/1.jpg
-qa-images/{kb_id}/{doc_id}/{chunk_id}/{任务标识}/2.jpg
+存储对象名：a7c42e9160bf38d2
+数据库 image_paths：["知识库ID-a7c42e9160bf38d2", "知识库ID-f1938b62c0da745e"]
 ```
 
-图片扩展名必须与实际编码一致。任务标识在同一次任务重试中保持稳定，避免每次重试新增一套对象。路径 List 按提取顺序生成，不能按并发上传完成顺序排列。
+图片内容仍为 JPEG，与原合并图一致，不要求对象名带 `.jpg` 后缀。数据库字段和新接口字段仍叫 `image_paths`，但元素为单图 ID，不是目录路径或签名 URL。上传、重试校验和失败清理统一使用短对象名；List 按原文顺序排列。同一任务重试复用对象名，原合并图 ID 和原接口保持不变。
+
+此次调整仅作用于采用新代码处理的独立图片，历史目录格式记录和对象不迁移、不删除。历史任务和记录仍需保留原版本处理，不应在有旧版本待处理图片任务时切换命名规则。短 ID 版本采用独立镜像标签 `ragflow:0.26.4-qa-images-short-id`，镜像内 21 项针对性测试通过；没有重启现有服务或修改工具项目。
 
 ## 6. 异步处理与失败隔离
 
@@ -120,7 +122,7 @@ qa-images/{kb_id}/{doc_id}/{chunk_id}/{任务标识}/2.jpg
 4. 全部上传成功后，事务写入完整映射。
 5. 成功后清理暂存数据；失败采用有限次数重试，重试耗尽后记录明确错误。
 
-暂存介质与队列入口尚未通过源码核实，属于实施前确认项。若消费者可能跨机器运行，不能使用仅生产者本机可见的临时文件。队列消息只放关联 ID 和暂存位置，不放大块图片二进制。
+当前实现复用现有 Redis：图片二进制编码后暂存在独立缓存键中，有效期为 24 小时，单个切片暂存内容上限为 16 MiB。独立 Stream 使用 `ragflow:qa-images`，消息只放关联 ID 和缓存位置，不放图片二进制。消费者在原执行器进程内独立运行，不占用原解析任务并发额度。重启后按相同消费者名称恢复自己的未确认任务，不承诺在消费者名称变化后自动接管旧任务。
 
 旁路提取、暂存、任务提交、上传和写表的异常均不得向原有解析链路传播，也不得改变原有成功状态。原有流程自身的异常处理保持原样。
 
@@ -158,4 +160,98 @@ qa-images/{kb_id}/{doc_id}/{chunk_id}/{任务标识}/2.jpg
 - 明确 PDF 表格是否也需要作为图片保存。
 - 验证同文档重复问答、文字相同但图片不同的实际行为。
 
-本文件仅记录方案，不代表已经创建数据库表、修改解析代码或启用后台任务。
+已新增映射模型，并接入 Word/PDF QA 提取、Redis 暂存和独立后台消费者。映射表由项目现有数据库初始化机制识别创建。10 项针对性单元测试通过，覆盖顺序、同段多图、上传失败、幂等、冲突拒绝和后台失败隔离。
+
+## 11. 本地 Docker 验证
+
+基础镜像为 `infiniflow/ragflow:v0.26.4`，当前本地后端源码通过根目录 `Dockerfile.local` 打包为 `ragflow:0.26.4-qa-images`。Python 依赖和前端资源沿用基础镜像，不执行 Git 操作。
+
+在项目根目录执行：
+
+```powershell
+docker build --pull=false -f Dockerfile.local -t ragflow:0.26.4-qa-images .
+docker compose -p ragflow-qa-local -f docker/docker-compose.yml -f docker/docker-compose.qa-local.yml up -d mysql redis minio es01 ragflow-cpu
+```
+
+本地覆盖配置明确使用 Python API、Python 解析器、MySQL 和 MinIO；数据卷与网络使用独立项目名称，不替换原有容器。
+
+| 服务 | 本地入口 |
+| --- | --- |
+| RAGFlow 页面 | `http://localhost:18080` |
+| Python API | `http://localhost:19380` |
+| MinIO 控制台 | `http://localhost:19001` |
+| MinIO 对象接口 | `http://localhost:19000` |
+| MySQL | `127.0.0.1:13306` |
+| Redis | `127.0.0.1:16379` |
+| Elasticsearch | `http://localhost:19200` |
+
+账号配置沿用 `docker/.env`，不要将其中的密钥复制进镜像或提交到其他文件。
+
+已验证：
+
+- 新镜像内 10 项单元测试通过，560 个 Python 源文件通过语法检查。
+- 页面返回 HTTP 200，MySQL、Redis、Elasticsearch、MinIO 健康检查通过。
+- 使用一个答案中同段包含红、蓝两张图片的真实 Word 输入，执行实际 QA 解析、原有合并图上传、Redis 后台任务和 MySQL 映射写入。
+- 从 MinIO 读回两张独立图片，颜色与顺序正确，原有合并图仍存在。
+
+此次存储联调记录的文档 ID 为 `1c1c1ae445954a7a9f2128bf29aab442`，可在本地 MySQL 中查看：
+
+```sql
+SELECT doc_id, chunk_id, merged_image_id, image_paths,
+       JSON_LENGTH(image_paths) AS image_count
+FROM chunk_image_mapping
+WHERE doc_id = '1c1c1ae445954a7a9f2128bf29aab442';
+```
+
+预期为一条记录，`image_count` 为 2。该记录属于存储联调输入，未通过页面上传，也未创建对应的知识库、文档记录或检索索引。页面上传后的完整解析及检索流程、真实 PDF 和实际 OSS 仍需分别验证；页面操作解析前还需要配置可用的嵌入模型。
+
+查看或停止本地测试环境：
+
+```powershell
+docker compose -p ragflow-qa-local -f docker/docker-compose.yml -f docker/docker-compose.qa-local.yml ps
+docker compose -p ragflow-qa-local -f docker/docker-compose.yml -f docker/docker-compose.qa-local.yml logs --tail 100 ragflow-cpu
+docker compose -p ragflow-qa-local -f docker/docker-compose.yml -f docker/docker-compose.qa-local.yml stop
+```
+
+## 12. 带独立图片的新增召回接口
+
+新增 `POST /api/v1/retrieval/images`，原有 `POST /api/v1/retrieval` 不变。
+
+新入口直接调用原入口（包括原入口的鉴权装饰器），因此请求参数、知识库权限校验、过滤、重排、分页、图谱召回、目录增强和元数据能力沿用原接口。原接口返回错误时，新入口原样返回错误，不执行图片查询。
+
+仅对成功响应进行 JSON 解码并补充图片，不修改检索器内部可能共享的结果对象。保留原有 `image_id`、聚合结果、状态码及响应头，在每个切片中增加 `image_paths`。该字段沿用映射表中的有序内部存储标识，不在此接口生成签名或改变原有图片存储格式。
+
+请求示例（请求参数及认证信息与原召回接口一致）：
+
+```bash
+curl -X POST 'http://服务器地址/api/v1/retrieval/images' \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"dataset_ids":["知识库ID"],"question":"问题","page":1,"page_size":10}'
+```
+
+切片返回示例（其余原有字段保持原样）：
+
+```json
+{
+  "id": "原切片ID",
+  "dataset_id": "知识库ID",
+  "document_id": "文档ID",
+  "image_id": "原合并图ID",
+  "image_paths": ["第一张图片的内部存储标识", "第二张图片的内部存储标识"]
+}
+```
+
+图片查询按本次已鉴权召回结果中的知识库、文档和合并图标识批量执行，不能仅通过合并图标识跨知识库取图。
+
+以下均是正常结果，返回 `image_paths: []`，不报错、不记录错误日志：
+
+- 切片没有合并图标识。
+- 合并图没有对应映射，包括旧文档和异步任务尚未完成的情况。
+- 映射中的图片列表为空。
+
+只有映射数据库查询本身异常时才记录错误日志；新接口仍保留原召回结果，图片列表为空。不额外请求 OSS 检查对象是否存在，因此不会因 OSS 暂时不可用而改变召回能力。
+
+新增入口会批量读取 MySQL 映射，原召回入口不会触发这次新增查询。测试服务器需重新导入包含此接口的新镜像并重建应用容器，旧镜像不会自动获得新路由。
+
+验证结果：新增召回扩展测试 10 项与原图片存储测试 10 项在更新后的镜像中全部通过；新增文件的 Ruff 检查和 80 列格式检查通过。本地实际 HTTP 检查确认原、新接口对未登录请求均返回相同的 HTTP 401 和相同响应内容。成功召回的参数传递、原字段保留、批量映射及缺失图片处理通过隔离测试验证，尚未在测试服务器完成带真实嵌入模型的成功召回联调。
